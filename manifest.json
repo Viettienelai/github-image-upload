@@ -1,0 +1,10 @@
+{
+	"id": "github-image-upload",
+	"name": "GitHub Image Upload",
+	"version": "3.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Upload images directly to GitHub and serve them via jsDelivr CDN with Year/Month organization.",
+	"author": "Viettienelai",
+	"authorUrl": "https://github.com/Viettienelai",
+	"isDesktopOnly": false
+}
