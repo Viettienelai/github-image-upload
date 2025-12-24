@@ -1,4 +1,3 @@
-
 # GitHub Image Upload (Obsidian Plugin)
 
 **GitHub Image Upload** is a high-performance Obsidian plugin designed to streamline your image workflow. It automatically uploads images to GitHub and serves them via the lightning-fast **jsDelivr CDN**, keeping your local vault lightweight and your images globally accessible.
@@ -17,8 +16,8 @@
 ## 🛠️ Installation
 
 ### Manual Installation
-1. Download the plugin folder.
-2. Place it into your vault's `.obsidian/plugins/` directory.
+1. Download `main.js` and `manifest.json`.
+2. Place it into your vault's `.obsidian/plugins/github-image-upload` directory.
 3. Open **Obsidian Settings** > **Community Plugins** > **Reload**.
 4. Enable **GitHub Image Master**.
 
