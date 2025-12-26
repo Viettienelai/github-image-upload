@@ -1,0 +1,45 @@
+/* Tắt thanh cuộn của popup chính */
+.meld-no-scroll {
+    overflow: hidden !important;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Vùng chứa Preview có thanh cuộn riêng và giới hạn width 1000px */
+.meld-decrypt-preview-container {
+    padding: 25px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background-color: var(--background-primary);
+    overflow-y: auto;
+    max-height: 65vh;
+    max-width: 700px;
+    margin: 0 auto;
+    width: 100%;
+    line-height: var(--editor-line-height);
+}
+
+.meld-decrypt-preview-container.markdown-rendered .callout {
+    margin: 1em 0;
+}
+
+.modal.mod-sidebar-layout {
+    max-width: 1100px;
+}
+
+/* Biểu tượng ổ khóa trong Reading Mode */
+.meld-encrypt-inline-reading-marker {
+    cursor: pointer;
+    background-color: var(--background-secondary-alt);
+    padding: 3px 12px;
+    border-radius: 15px;
+    border: 1px solid var(--interactive-accent);
+    font-size: 0.85em;
+    color: var(--text-normal);
+    transition: all 0.2s ease-in-out;
+}
+
+.meld-encrypt-inline-reading-marker:hover {
+    background-color: var(--interactive-accent);
+    color: white;
+}

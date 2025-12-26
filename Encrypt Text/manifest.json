@@ -1,0 +1,10 @@
+{
+  "id": "encrypt-text",
+  "name": "Encrypt Text",
+  "version": "1.0",
+  "minAppVersion": "0.13.11",
+  "description": "Encrypt selected text in yout ,md files.",
+  "author": "Viettienelai",
+  "authorUrl": "https://github.com/Viettienelai",
+  "isDesktopOnly": false
+}
