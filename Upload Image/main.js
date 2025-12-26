@@ -48,7 +48,6 @@ module.exports = class GitHubImageUpload extends Plugin {
         // 5. Context Menu: Delete image from GitHub
         this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor) => {
             const lineText = editor.getLine(editor.getCursor().line);
-            // Identify GitHub or CDN links in the current line
             if ((lineText.includes("raw.githubusercontent.com") || lineText.includes("cdn.jsdelivr.net")) && lineText.includes("![")) {
                 menu.addItem((item) => {
                     item.setTitle("🗑️ Delete this image from GitHub")
@@ -70,7 +69,8 @@ module.exports = class GitHubImageUpload extends Plugin {
     }
 
     updateCdnBase() {
-        this.CDN_BASE = `https://cdn.jsdelivr.net/gh/${this.settings.repo}@${this.settings.branch}/`;
+        // Mã hóa luôn cả CDN_BASE nếu repo hoặc branch có dấu cách (hiếm gặp nhưng an toàn)
+        this.CDN_BASE = encodeURI(`https://cdn.jsdelivr.net/gh/${this.settings.repo}@${this.settings.branch}/`);
     }
 
     // --- FILE PROCESSING LOGIC ---
@@ -117,20 +117,29 @@ module.exports = class GitHubImageUpload extends Plugin {
             const base64 = reader.result.split(',')[1];
             const extension = file.name.split('.').pop() || 'png';
             const fileName = `${this.getTimestampName()}.${extension}`;
-            const path = `${this.settings.rootFolder}/${this.getFolderPathStructure()}/${fileName}`.replace(/\/+/g, '/');
+            
+            // Đường dẫn gốc để gửi lên GitHub API (GitHub API tự hiểu dấu cách hoặc cần được giữ nguyên tùy context)
+            const rawPath = `${this.settings.rootFolder}/${this.getFolderPathStructure()}/${fileName}`.replace(/\/+/g, '/');
 
             new Notice(`🚀 Uploading: ${fileName}`);
 
             try {
-                const res = await fetch(`https://api.github.com/repos/${this.settings.repo}/contents/${path}`, {
+                // Khi gửi API, chúng ta cần encodeURIComponent cho từng segment hoặc toàn bộ path để GitHub API không lỗi
+                const apiPath = encodeURI(rawPath);
+                const res = await fetch(`https://api.github.com/repos/${this.settings.repo}/contents/${apiPath}`, {
                     method: 'PUT',
                     headers: { 'Authorization': `token ${this.settings.token}` },
                     body: JSON.stringify({ message: `Upload ${fileName}`, content: base64, branch: this.settings.branch })
                 });
 
                 if (res.ok) {
-                    editor.replaceSelection(`![${fileName}](${this.CDN_BASE}${path})\n`);
+                    // QUAN TRỌNG: Mã hóa dấu cách thành %20 cho link hiển thị trong Obsidian
+                    const encodedPath = encodeURI(rawPath);
+                    editor.replaceSelection(`![${fileName}](${this.CDN_BASE}${encodedPath})\n`);
                     new Notice(`✅ Success!`);
+                } else {
+                    const errorData = await res.json();
+                    new Notice(`❌ Upload failed: ${errorData.message}`);
                 }
             } catch (e) { new Notice(`❌ API connection error.`); }
         };
@@ -144,17 +153,19 @@ module.exports = class GitHubImageUpload extends Plugin {
         if (startIdx === -1) return;
         
         const pathPart = lineText.substring(startIdx + branchPattern.length).split(')')[0];
+        // Sử dụng decodeURIComponent để lấy lại path gốc (có dấu cách) từ link %20
         const path = decodeURIComponent(pathPart);
 
         new Notice("🗑️ Deleting image from GitHub...");
 
         try {
-            const getRes = await fetch(`https://api.github.com/repos/${this.settings.repo}/contents/${path}`, {
+            const apiPath = encodeURI(path);
+            const getRes = await fetch(`https://api.github.com/repos/${this.settings.repo}/contents/${apiPath}`, {
                 headers: { 'Authorization': `token ${this.settings.token}` }
             });
             if (getRes.ok) {
                 const data = await getRes.json();
-                const delRes = await fetch(`https://api.github.com/repos/${this.settings.repo}/contents/${path}`, {
+                const delRes = await fetch(`https://api.github.com/repos/${this.settings.repo}/contents/${apiPath}`, {
                     method: 'DELETE',
                     headers: { 'Authorization': `token ${this.settings.token}` },
                     body: JSON.stringify({ message: `Delete image`, sha: data.sha, branch: this.settings.branch })
@@ -177,8 +188,12 @@ module.exports = class GitHubImageUpload extends Plugin {
             for (const file of allMdFiles) {
                 const content = await this.app.vault.read(file);
                 let m; while ((m = regex.exec(content)) !== null) {
-                    const path = decodeURIComponent(m[0]).split(`${this.settings.branch}/`)[1];
-                    if (path) usedPaths.add(path);
+                    const fullUrl = m[0];
+                    const pathPart = fullUrl.split(`${this.settings.branch}/`)[1].split(')')[0];
+                    if (pathPart) {
+                        // Giải mã %20 thành dấu cách để so sánh với danh sách file trên GitHub
+                        usedPaths.add(decodeURIComponent(pathPart));
+                    }
                 }
             }
 
@@ -195,7 +210,8 @@ module.exports = class GitHubImageUpload extends Plugin {
             if (!confirm(`Delete ${unused.length} unused images from GitHub?`)) return;
 
             for (const file of unused) {
-                await fetch(`https://api.github.com/repos/${this.settings.repo}/contents/${file.path}`, {
+                const apiPath = encodeURI(file.path);
+                await fetch(`https://api.github.com/repos/${this.settings.repo}/contents/${apiPath}`, {
                     method: 'DELETE',
                     headers: { 'Authorization': `token ${this.settings.token}` },
                     body: JSON.stringify({ message: `Cleanup`, sha: file.sha, branch: this.settings.branch })
@@ -228,7 +244,7 @@ class GitHubImageSettingTab extends PluginSettingTab {
         containerEl.empty();
         containerEl.createEl('h2', { text: 'GitHub Image Upload Settings' });
 
-        new Setting(containerEl).setName('GitHub Token').setDesc('Personal Access Token (should have repo scope).')
+        new Setting(containerEl).setName('GitHub Token').setDesc('Personal Access Token (repo scope).')
             .addText(text => text.setPlaceholder('ghp_xxx').setValue(this.plugin.settings.token)
             .onChange(async (v) => { this.plugin.settings.token = v; await this.plugin.saveSettings(); })
             .inputEl.type = 'password');
@@ -241,7 +257,7 @@ class GitHubImageSettingTab extends PluginSettingTab {
             .addText(text => text.setValue(this.plugin.settings.branch)
             .onChange(async (v) => { this.plugin.settings.branch = v; await this.plugin.saveSettings(); }));
 
-        new Setting(containerEl).setName('Root Folder').setDesc('Root folder for storing images on GitHub')
+        new Setting(containerEl).setName('Root Folder').setDesc('Root folder for storing images (Spaces are allowed)')
             .addText(text => text.setValue(this.plugin.settings.rootFolder)
             .onChange(async (v) => { this.plugin.settings.rootFolder = v; await this.plugin.saveSettings(); }));
     }
