@@ -1,0 +1,10 @@
+{
+	"id": "file&folder-order",
+	"name": "File&Folder Order",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Sắp xếp folder theo ý thích bằng cấu hình thủ công.",
+	"author": "Gemini",
+	"authorUrl": "",
+	"isDesktopOnly": false
+}

@@ -1,0 +1,10 @@
+{
+	"id": "hide-file&folder",
+	"name": "Hide file&folder",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Cho phép ẩn file/folder khỏi File Explorer và bật/tắt chế độ xem.",
+	"author": "Gemini",
+	"authorUrl": "",
+	"isDesktopOnly": false
+}
