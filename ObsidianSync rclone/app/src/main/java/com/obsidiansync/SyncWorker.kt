@@ -1,256 +1,168 @@
 package com.obsidiansync
 
-import android.accounts.Account
-import android.app.NotificationChannel
-import android.app.NotificationManager
+import android.app.*
 import android.content.Context
-import android.content.pm.ServiceInfo
+import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
 import android.os.Build
 import androidx.core.app.NotificationCompat
-import androidx.work.CoroutineWorker
-import androidx.work.ForegroundInfo
-import androidx.work.WorkerParameters
-import androidx.work.workDataOf
+import androidx.work.*
 import com.google.android.gms.auth.GoogleAuthUtil
-import java.io.BufferedReader
+import android.accounts.Account
 import java.io.File
-import java.io.InputStream
-import java.io.InputStreamReader
-import java.io.OutputStream
-import java.net.InetAddress
-import java.net.ServerSocket
-import java.net.Socket
-import java.util.regex.Pattern
-import kotlin.concurrent.thread
+import java.net.*
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
-class SyncWorker(
-    context: Context,
-    params: WorkerParameters
-) : CoroutineWorker(context, params) {
-
-    private var currentProgress = 0
-    private val NOTIFICATION_ID_RUNNING = 1
-    private val NOTIFICATION_ID_RESULT = 2
-    private val CHANNEL_ID = "obsidian_sync_channel"
+class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+    private val CHANNEL = "obsidian_sync"
 
     override suspend fun doWork(): Result {
         val isUpload = inputData.getBoolean("is_upload", true)
-        val context = applicationContext
+        setForeground(getNotif(if (isUpload) "Đang Upload..." else "Đang Download...", true))
 
-        // --- QUAN TRỌNG: BẬT CHẾ ĐỘ FOREGROUND NGAY LẬP TỨC ---
-        // Đây là tấm khiên bảo vệ App khỏi bị Android giết khi chạy ngầm
-        setForeground(createForegroundInfo("🚀 Đang khởi động..."))
-
-        val localPath = AppConfig.getLocalPath(context)
-        val remotePath = AppConfig.getRemotePath(context)
-
-        val source = if (isUpload) localPath else remotePath
-        val dest = if (isUpload) remotePath else localPath
-        val modeText = if (isUpload) "Upload" else "Download"
-
-        // --- BƯỚC 0: REFRESH TOKEN ---
+        // 1. Refresh Token an toàn
         try {
-            val email = AppConfig.getUserEmail(context)
-            if (email != null) {
-                val account = Account(email, "com.google")
-                val newToken = GoogleAuthUtil.getToken(context, account, "oauth2:https://www.googleapis.com/auth/drive")
-                val configFile = File(context.filesDir, "rclone.conf")
-                if (configFile.exists()) {
-                    val currentConfig = configFile.readText()
-                    val rootFolderLine = currentConfig.lines().find { it.startsWith("root_folder_id") } ?: ""
-                    val newConfigContent = """
-[gdrive]
-type = drive
-scope = drive
-token = {"access_token":"$newToken","token_type":"Bearer","expiry":"2030-01-01T00:00:00.000000+07:00"}
-$rootFolderLine
-""".trimIndent()
-                    configFile.writeText(newConfigContent)
-                }
+            val email = AppConfig.getUserEmail(applicationContext) ?: return Result.failure()
+            val token = GoogleAuthUtil.getToken(applicationContext, Account(email, "com.google"), "oauth2:https://www.googleapis.com/auth/drive")
+            val conf = File(applicationContext.filesDir, "rclone.conf")
+            if (conf.exists()) {
+                val root = conf.readText().lines().find { it.startsWith("root_folder_id") } ?: ""
+                conf.writeText("[gdrive]\ntype = drive\nscope = drive\ntoken = {\"access_token\":\"$token\",\"token_type\":\"Bearer\",\"expiry\":\"2030-01-01T00:00:00+07:00\"}\n$root")
             }
-        } catch (e: Exception) { e.printStackTrace() }
-
-        // KHỞI ĐỘNG PROXY
-        val proxyPort = 10800
-        val proxy = TinyProxy(proxyPort)
-        proxy.start()
-
-        return try {
-            val libPath = context.applicationInfo.nativeLibraryDir
-            val binaryFile = File(libPath, "librclone.so")
-
-            if (!binaryFile.exists()) {
-                showResultNotification("❌ Lỗi: Thiếu file librclone.so")
-                return Result.failure()
-            }
-
-            val configPath = File(context.filesDir, "rclone.conf").absolutePath
-            val cachePath = context.cacheDir.absolutePath
-            val homePath = context.filesDir.absolutePath
-
-            // --- LỆNH SYNC ---
-            val cmd = listOf(
-                binaryFile.absolutePath,
-                "--config", configPath,
-                "sync", source, dest,
-                "--transfers", "4",
-                "--checkers", "8",
-                "--delete-during",
-                "--create-empty-src-dirs",
-                "--progress",
-                "--cache-dir", cachePath,
-                "--no-check-certificate",
-                "--user-agent", "ObsidianSyncAndroid",
-                "--drive-chunk-size", "32M",
-                "--drive-use-trash=false"
-            )
-
-            val processBuilder = ProcessBuilder(cmd)
-            processBuilder.redirectErrorStream(true)
-            processBuilder.directory(context.filesDir)
-
-            val env = processBuilder.environment()
-            env["LD_LIBRARY_PATH"] = libPath
-            env["HOME"] = homePath
-            env["TMPDIR"] = cachePath
-            env["XDG_CONFIG_HOME"] = homePath
-            env["XDG_CACHE_HOME"] = cachePath
-
-            val proxyUrl = "http://127.0.0.1:$proxyPort"
-            env["http_proxy"] = proxyUrl
-            env["https_proxy"] = proxyUrl
-            env["HTTP_PROXY"] = proxyUrl
-            env["HTTPS_PROXY"] = proxyUrl
-
-            val process = processBuilder.start()
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-
-            var line: String?
-            val globalProgressRegex = Pattern.compile("Transferred:.*, (\\d+)%")
-
-            while (reader.readLine().also { line = it } != null) {
-                line?.let { logLine ->
-                    val matcher = globalProgressRegex.matcher(logLine)
-                    if (matcher.find()) {
-                        val percent = matcher.group(1)?.toIntOrNull() ?: 0
-                        if (percent > currentProgress && percent < 100) {
-                            currentProgress = percent
-                            // Cập nhật % lên App
-                            setProgress(workDataOf("progress" to currentProgress))
-                            // Cập nhật % lên Thanh thông báo
-                            updateForegroundNotification("Đang $modeText: $percent%")
-                        }
-                    }
-                }
-            }
-
-            process.waitFor()
-            val exitCode = process.exitValue()
-            proxy.stop()
-
-            if (exitCode == 0) {
-                showResultNotification("✅ $modeText hoàn tất!")
-                setProgress(workDataOf("progress" to 100))
-                return Result.success()
-            } else {
-                showResultNotification("❌ Lỗi Sync (Code: $exitCode)")
-                return Result.failure()
-            }
-
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+
+        // 2. Khởi động Proxy với Thread Pool
+        val proxy = TinyProxy(10800).apply { start() }
+
+        val lib = File(applicationContext.applicationInfo.nativeLibraryDir, "librclone.so").absolutePath
+        val cache = applicationContext.cacheDir.absolutePath
+
+        return try {
+            val src = if (isUpload) AppConfig.getLocalPath(applicationContext) else AppConfig.getRemotePath(applicationContext)
+            val dst = if (isUpload) AppConfig.getRemotePath(applicationContext) else AppConfig.getLocalPath(applicationContext)
+
+            val pb = ProcessBuilder(
+                lib, "--config", File(applicationContext.filesDir, "rclone.conf").absolutePath,
+                "sync", src, dst, "--transfers", "4", "--checkers", "4", // Giảm checkers để tránh quá tải
+                "--delete-during", "--create-empty-src-dirs", "--progress",
+                "--cache-dir", cache, "--no-check-certificate",
+                "--user-agent", "ObsidianSync", "--drive-chunk-size", "32M", "--drive-use-trash=false"
+            ).redirectErrorStream(true).directory(applicationContext.filesDir)
+
+            pb.environment().apply {
+                put("LD_LIBRARY_PATH", applicationContext.applicationInfo.nativeLibraryDir)
+                put("HOME", applicationContext.filesDir.absolutePath)
+                put("TMPDIR", cache)
+                put("http_proxy", "http://127.0.0.1:10800")
+                put("https_proxy", "http://127.0.0.1:10800")
+            }
+
+            val process = pb.start()
+            val regex = "Transferred:.*, (\\d+)%".toPattern()
+
+            process.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    regex.matcher(line).takeIf { it.find() }?.group(1)?.toIntOrNull()?.let { p ->
+                        setProgress(workDataOf("progress" to p))
+                        if (p % 10 == 0) setForeground(getNotif("Đang Sync: $p%", true))
+                    }
+                }
+            }
+
+            if (process.waitFor() == 0) {
+                Result.success()
+            } else {
+                notifyResult("❌ Lỗi Code: ${process.exitValue()}")
+                Result.failure()
+            }
+        } catch (e: Exception) {
+            notifyResult("❌ Crash: ${e.message}")
+            Result.failure()
+        } finally {
             proxy.stop()
-            showResultNotification("❌ Crash: ${e.message}")
-            return Result.failure()
         }
     }
 
-    // --- HÀM TẠO THÔNG BÁO FOREGROUND (BẮT BUỘC) ---
-    private fun createForegroundInfo(message: String): ForegroundInfo {
-        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "Obsidian Sync", NotificationManager.IMPORTANCE_LOW)
-            manager.createNotificationChannel(channel)
-        }
+    private fun getNotif(msg: String, running: Boolean): ForegroundInfo {
+        val mgr = applicationContext.getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) mgr.createNotificationChannel(NotificationChannel(CHANNEL, "Sync", NotificationManager.IMPORTANCE_LOW))
 
-        val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("Obsidian Sync")
-            .setContentText(message)
-            .setOngoing(true) // Không cho vuốt tắt
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+        val notif = NotificationCompat.Builder(applicationContext, CHANNEL)
+            .setSmallIcon(if (running) android.R.drawable.stat_sys_download else android.R.drawable.stat_notify_error)
+            .setContentTitle("Obsidian Sync").setContentText(msg).setOngoing(running).build()
 
-        // Android 14 yêu cầu khai báo Type
-        return if (Build.VERSION.SDK_INT >= 34) {
-            ForegroundInfo(NOTIFICATION_ID_RUNNING, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            ForegroundInfo(NOTIFICATION_ID_RUNNING, notification)
-        }
+        return if (Build.VERSION.SDK_INT >= 34) ForegroundInfo(1, notif, FOREGROUND_SERVICE_TYPE_DATA_SYNC) else ForegroundInfo(1, notif)
     }
 
-    // Cập nhật nội dung thông báo đang chạy
-    private suspend fun updateForegroundNotification(message: String) {
-        setForeground(createForegroundInfo(message))
-    }
+    private fun notifyResult(msg: String) = (applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(2, getNotif(msg, false).notification)
 
-    // Thông báo kết quả (dùng ID khác để không bị xóa khi Worker tắt)
-    private fun showResultNotification(message: String) {
-        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setContentTitle("Obsidian Sync")
-            .setContentText(message)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .build()
-        manager.notify(NOTIFICATION_ID_RESULT, notification)
-    }
-
+    // --- FIX: DÙNG EXECUTOR SERVICE ĐỂ QUẢN LÝ THREAD ---
     class TinyProxy(private val port: Int) {
+        @Volatile var isRunning = true
+        private val executor = Executors.newCachedThreadPool() // Tự động tái sử dụng Thread
         private var serverSocket: ServerSocket? = null
-        @Volatile private var isRunning = true
+
         fun start() {
-            thread {
+            // Chạy ServerSocket trên 1 thread riêng biệt
+            executor.execute {
                 try {
                     serverSocket = ServerSocket(port, 50, InetAddress.getByName("127.0.0.1"))
+                    // Set timeout để vòng lặp không bị treo vĩnh viễn khi stop()
+                    serverSocket?.soTimeout = 2000
+
                     while (isRunning) {
-                        val client = serverSocket?.accept() ?: break
-                        thread { handleClient(client) }
+                        try {
+                            // Blocking call, đợi kết nối
+                            val client = serverSocket?.accept()
+                            if (client != null) {
+                                // Xử lý kết nối bằng Thread Pool (KHÔNG TẠO THREAD MỚI VÔ TỘI VẠ)
+                                executor.execute { handle(client) }
+                            }
+                        } catch (e: SocketTimeoutException) {
+                            // Timeout để check biến isRunning, tiếp tục vòng lặp
+                        } catch (e: Exception) {
+                            if (isRunning) e.printStackTrace()
+                        }
                     }
-                } catch (e: Exception) {}
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
         }
-        fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
-        private fun handleClient(client: Socket) {
-            try {
-                val input = client.getInputStream()
-                val reader = BufferedReader(InputStreamReader(input))
-                val requestLine = reader.readLine() ?: return
-                if (!requestLine.startsWith("CONNECT")) { client.close(); return }
-                val parts = requestLine.split(" ")
-                if (parts.size < 2) return
+
+        fun stop() {
+            isRunning = false
+            try { serverSocket?.close() } catch (_: Exception) {}
+            executor.shutdownNow() // Dừng tất cả các luồng xử lý
+        }
+
+        private fun handle(cl: Socket) = try { cl.use {
+            val rd = it.getInputStream().bufferedReader()
+            val req = rd.readLine()
+            if (req?.startsWith("CONNECT") == true) {
+                val parts = req.split(" ")
                 val hostPort = parts[1].split(":")
                 val host = hostPort[0]
                 val port = hostPort.getOrNull(1)?.toInt() ?: 443
-                while (reader.readLine().isNotEmpty()) {}
-                val remote = Socket(host, port)
-                val output = client.getOutputStream()
-                output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-                output.flush()
-                thread { copyStream(input, remote.getOutputStream()) }
-                copyStream(remote.getInputStream(), output)
-                remote.close(); client.close()
-            } catch (e: Exception) { try { client.close() } catch (ex: Exception) {} }
-        }
-        private fun copyStream(ins: InputStream, outs: OutputStream) {
-            try {
-                val buffer = ByteArray(4096)
-                var bytesRead: Int
-                while (ins.read(buffer).also { bytesRead = it } != -1) { outs.write(buffer, 0, bytesRead) }
-                outs.flush()
-            } catch (e: Exception) {}
-        }
+
+                // Đọc hết header thừa
+                while (rd.readLine().isNotEmpty()) {}
+
+                it.getOutputStream().write("HTTP/1.1 200 OK\r\n\r\n".toByteArray())
+
+                val rm = Socket(host, port)
+                rm.use { remote ->
+                    // Copy luồng dữ liệu 2 chiều
+                    val t = Executors.newSingleThreadExecutor()
+                    t.execute {
+                        try { remote.inputStream.copyTo(it.getOutputStream()) } catch (_: Exception) {}
+                    }
+                    try { it.inputStream.copyTo(remote.getOutputStream()) } catch (_: Exception) {}
+                    t.shutdownNow()
+                }
+            }
+        }} catch (_: Exception) {}
     }
 }
-
-
