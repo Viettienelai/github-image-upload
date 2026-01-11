@@ -45,10 +45,18 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
             val pb = ProcessBuilder(
                 lib, "--config", File(applicationContext.filesDir, "rclone.conf").absolutePath,
-                "sync", src, dst, "--transfers", "4", "--checkers", "4", // Giảm checkers để tránh quá tải
-                "--delete-during", "--create-empty-src-dirs", "--progress",
-                "--cache-dir", cache, "--no-check-certificate",
-                "--user-agent", "ObsidianSync", "--drive-chunk-size", "32M", "--drive-use-trash=false"
+                "sync", src, dst,
+                "--transfers", "4",
+                "--checkers", "4", // Giảm checkers để tránh quá tải
+                "--delete-during",
+                "--create-empty-src-dirs",
+                "--progress",
+                "--cache-dir", cache,
+                "--no-check-certificate",
+                "--user-agent",
+                "ObsidianSync",
+                "--drive-chunk-size", "32M",
+                "--drive-use-trash=false"
             ).redirectErrorStream(true).directory(applicationContext.filesDir)
 
             pb.environment().apply {
